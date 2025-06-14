@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DODO Flash Loan Arbitrage</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+  <style>
+    body {
+      background-color: #002d00;
+      color: #39ff14;
+      font-family: monospace;
+      padding: 20px;
+    }
+    button {
+      background: #39ff14;
+      color: #002d00;
+      padding: 10px;
+      margin: 5px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    input, select {
+      padding: 8px;
+      margin: 5px;
+    }
+    .log {
+      white-space: pre-wrap;
+      border: 1px solid #39ff14;
+      padding: 10px;
+      margin-top: 20px;
+      max-height: 300px;
+      overflow-y: scroll;
+    }
+  </style>
+</head>
+<body>
+  <h1>DODO Flash Loan Arbitrage</h1>
+
+  <div>
+    <button id="connect">Connect Wallet</button>
+    <span id="wallet"></span>
+    <span id="balance"></span>
+  </div>
+
+  <div>
+    <label>Token:</label>
+    <select id="token1"></select>
+  </div>
+
+  <div>
+    <label>Trade Amount (USDC):</label>
+    <input id="tradeAmount" type="number" value="1000" step="0.001">
+    <label>Min Profit (USDC):</label>
+    <input id="minProfit" type="number" value="0.00000000001" step="0.00000000001">
+  </div>
+
+  <div>
+    <label>Slippage (bps):</label>
+    <input id="slippage" type="number" value="5">
+  </div>
+
+  <div>
+    <label>Gas Mode:</label>
+    <select id="gasOption">
+      <option value="dynamic">Dynamic</option>
+      <option value="fast">Fast</option>
+      <option value="turbo">Turbo</option>
+    </select>
+
+    <label>Manual Gas Limit:</label>
+    <input id="manualGas" type="number" placeholder="Optional (e.g. 1000000)">
+    <label>Bribe (MATIC):</label>
+    <input id="bribe" type="number" value="0.005" step="0.0001">
+  </div>
+
+  <div>
+    <button id="approve">Approve USDC</button>
+    <button id="start">Start</button>
+    <button id="stop">Stop</button>
+    <button id="autoscan">AutoScan All</button>
+  </div>
+
+  <div>
+    <label>AutoTrade:</label><input type="checkbox" id="autotrade">
+    <label>Use Flash Loan:</label><input type="checkbox" id="useflash">
+  </div>
+
+  <div class="log" id="log"></div>
+
+  <script>
+    const contractAddress = "0x2498Bc50732a655F0DbEa3319B1Cd7DDec884b6a"; // Replace with your contract
+    const abi = [/* ABI PLACEHOLDER */]; // Replace with your deployed contract ABI
+
+    const tokens = {
+      AAVE: "0x8dff5e27ea6b7ac08ebfdf9eb090f32ee9a30fcf",
+      WBTC: "0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6",
+      UNI:  "0xb33eaad8d922b1083446dc23f610c2567fb5180f",
+      USDC: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+      DAI:  "0x8f3cf7ad23cd3cadbd9735aff958023239c6a063",
+      USDT: "0xc2132d05d31c914a87c6611c10748aeb04b58e8f",
+      SHIB: "0x6f8a06447ff6fcf75d803135a7de15ce88c1d4ec",
+      CRV:  "0x172370d5cd63279efa6d502dab29171933a610af",
+      LINK: "0x53e0bca35ec356bd5dddfebbd1fc0fd03fabad39",
+      WETH: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619"
+    };
+
+    const tokenSelect = document.getElementById('token1');
+    Object.entries(tokens).forEach(([name, addr]) => {
+      const option = document.createElement('option');
+      option.value = addr;
+      option.text = name;
+      tokenSelect.appendChild(option);
+    });
+
+    let provider, signer, contract, intervalId;
+
+    const log = (msg) => {
+      const timestamp = new Date().toLocaleTimeString();
+      const el = document.getElementById('log');
+      el.innerText = `[${timestamp}] ${msg}\n` + el.innerText;
+    };
+
+    async function updateBalance() {
+      const usdc = new ethers.Contract(tokens.USDC, ["function balanceOf(address) view returns (uint256)"], provider);
+      const address = await signer.getAddress();
+      const balance = await usdc.balanceOf(address);
+      document.getElementById('balance').innerText = ` | USDC Balance: $${ethers.utils.formatUnits(balance, 6)}`;
+    }
+
+    document.getElementById('connect').onclick = async () => {
+      provider = new ethers.providers.Web3Provider(window.ethereum);
+      await provider.send("eth_requestAccounts", []);
+      signer = provider.getSigner();
+      contract = new ethers.Contract(contractAddress, abi, signer);
+      document.getElementById('wallet').innerText = await signer.getAddress();
+      log("Wallet connected");
+      updateBalance();
+    };
+
+    document.getElementById('approve').onclick = async () => {
+      const usdc = new ethers.Contract(tokens.USDC, ["function approve(address,uint256) public returns(bool)"], signer);
+      await usdc.approve(contractAddress, ethers.constants.MaxUint256);
+      log("USDC approved for contract");
+    };
+
+    document.getElementById('start').onclick = async () => {
+      clearInterval(intervalId);
+      log("Manual scan started");
+      scanAndTrade(document.getElementById('token1').value);
+    };
+
+    document.getElementById('stop').onclick = () => {
+      clearInterval(intervalId);
+      log("Scanning stopped");
+    };
+
+    document.getElementById('autoscan').onclick = () => {
+      clearInterval(intervalId);
+      const interval = parseInt(prompt("Enter scan interval in milliseconds (default 10000):", "10000")) || 10000;
+      log(`AutoScan All started every ${interval / 1000}s`);
+      intervalId = setInterval(async () => {
+        for (let [name, addr] of Object.entries(tokens)) {
+          if (addr !== tokens.USDC) await scanAndTrade(addr);
+        }
+      }, interval);
+    };
+
+    async function scanAndTrade(token1) {
+      const router = new ethers.Contract(
+        "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff", // QuickSwap router
+        ["function getAmountsOut(uint amountIn, address[] memory path) public view returns (uint[] memory)"],
+        provider
+      );
+      const tradeAmount = ethers.utils.parseUnits(document.getElementById('tradeAmount').value, 6);
+      const minProfit = ethers.utils.parseUnits(document.getElementById('minProfit').value, 6);
+      const tokenName = Object.keys(tokens).find(k => tokens[k] === token1);
+
+      try {
+        log(`Scanning ${tokenName} arbitrage...`);
+        const amountOut = await router.getAmountsOut(tradeAmount, [tokens.USDC, token1]);
+        const reverse = await router.getAmountsOut(amountOut[1], [token1, tokens.USDC]);
+
+        const profit = reverse[1].sub(tradeAmount);
+        const pct = profit.mul(10000).div(tradeAmount).toNumber() / 100;
+        log(`Estimated Profit: $${ethers.utils.formatUnits(profit, 6)} (${pct}%)`);
+
+        if (profit.gte(minProfit)) {
+          const autotrade = document.getElementById('autotrade').checked;
+          const useFlash = document.getElementById('useflash').checked;
+          const bribe = ethers.utils.parseEther(document.getElementById('bribe').value || '0.005');
+          const manualGas = document.getElementById('manualGas').value;
+          let overrides = { value: bribe };
+
+          if (manualGas) {
+            overrides.gasLimit = parseInt(manualGas);
+          } else {
+            const base = await provider.getGasPrice();
+            const mode = document.getElementById('gasOption').value;
+            overrides.gasPrice = base.mul(mode === 'turbo' ? 15 : mode === 'fast' ? 12 : 10).div(10);
+          }
+
+          if (autotrade) {
+            log(`${useFlash ? "⚡ Flash loan" : "🔁 Arbitrage"} executing...`);
+            const tx = useFlash
+              ? await contract.initiateFlashLoanArbitrage(token1, tradeAmount, overrides)
+              : await contract.initiateArbitrage(tokens.USDC, token1, tradeAmount, overrides);
+            log(`📤 Sent tx: ${tx.hash}`);
+            await tx.wait();
+            log(`✅ Success! Profit deposited. Tx: ${tx.hash}`);
+            updateBalance();
+          } else {
+            log("⚠️ Profit found! Waiting for wallet confirmation...");
+          }
+        } else {
+          log(`❌ No arbitrage opportunity for ${tokenName}`);
+        }
+      } catch (e) {
+        log("❌ Error: " + (e.reason || e.message));
+      }
+    }
+  </script>
+</body>
+</html>
